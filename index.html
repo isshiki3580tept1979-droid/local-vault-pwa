@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8">
+    <!-- viewport-fit=cover: draw under notches and use env(safe-area-inset-*).
+         interactive-widget=resizes-content: the on-screen keyboard shrinks the layout, so
+         sticky bottom bars (保存・コピー) stay reachable above it on Android Chrome. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="description" content="端末内だけで暗号化して保存する個人用パスワード保管庫の試作版">
+    <meta name="referrer" content="no-referrer">
+    <!-- Minimum privileges: everything denied, then only this app's own scripts, styles, images,
+         manifest and service worker. No network access from the page (connect-src 'none'),
+         no external origins, no data: URLs, no frames, no form submission targets. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; manifest-src 'self'; worker-src 'self'; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta name="theme-color" content="#07101d">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" type="image/svg+xml" href="./icons/icon.svg">
+    <link rel="stylesheet" href="./styles.css">
+    <title>Local Vault</title>
+  </head>
+  <body>
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Shown when a verified new version is waiting. Nothing changes until the user chooses to update. -->
+    <div id="update-banner" class="update-banner" role="status" hidden>
+      <p>新しいバージョンがあります。更新すると保管庫はロックされます（保存していない編集内容は破棄されます）。</p>
+      <button id="update-button" class="button button-primary" type="button">更新する</button>
+    </div>
+
+    <main class="shell">
+      <section id="auth-view" class="auth-view" aria-labelledby="auth-title">
+        <div class="brand-mark" aria-hidden="true">LV</div>
+        <p class="eyebrow">LOCAL VAULT</p>
+        <h1 id="auth-title">保管庫を準備しています</h1>
+        <p id="auth-copy" class="auth-copy">この端末内の保存状態を確認しています。</p>
+
+        <form id="setup-form" class="auth-form" hidden novalidate autocomplete="off">
+          <label for="setup-password">マスターパスワード</label>
+          <input id="setup-password" type="password" minlength="12" maxlength="200" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+          <p class="field-hint">12文字以上。忘れた場合、保管庫を復元する方法はありません。</p>
+          <label for="setup-confirm">マスターパスワード（確認）</label>
+          <input id="setup-confirm" type="password" minlength="12" maxlength="200" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+          <button class="button button-primary button-wide" type="submit">暗号化保管庫を作成</button>
+        </form>
+
+        <form id="unlock-form" class="auth-form" hidden novalidate autocomplete="off">
+          <label for="unlock-password">マスターパスワード</label>
+          <input id="unlock-password" type="password" maxlength="200" required autofocus autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+          <button class="button button-primary button-wide" type="submit">ロックを解除</button>
+        </form>
+        <details id="restore-new-panel" class="restore-panel" hidden>
+          <summary>バックアップから新しい保管庫を復元</summary>
+          <form id="restore-new-form" class="auth-form" novalidate autocomplete="off">
+            <p class="field-hint">バックアップ作成時のマスターパスワードで復号・検証し、新しいマスターパスワードと新しいsaltで暗号化し直して保存します。</p>
+            <label for="restore-new-file">暗号化バックアップ（JSON）</label>
+            <input id="restore-new-file" type="file" accept="application/json,.json">
+            <label for="restore-new-backup-password">バックアップのマスターパスワード</label>
+            <input id="restore-new-backup-password" type="password" maxlength="200" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+            <label for="restore-new-password">新しいマスターパスワード</label>
+            <input id="restore-new-password" type="password" minlength="12" maxlength="200" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+            <label for="restore-new-confirm">新しいマスターパスワード（確認）</label>
+            <input id="restore-new-confirm" type="password" minlength="12" maxlength="200" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+            <button class="button button-outline button-wide" type="submit">検証して新しい保管庫へ復元</button>
+          </form>
+        </details>
+        <p id="auth-error" class="form-error" role="alert"></p>
+        <p class="privacy-note">データと入力内容は外部へ送信されません。</p>
+      </section>
+
+      <section id="app-view" class="app-view" hidden>
+        <header class="app-header">
+          <div class="brand-inline">
+            <span class="brand-mark brand-mark-small" aria-hidden="true">LV</span>
+            <div><p class="eyebrow">LOCAL VAULT</p><h1>パスワード保管庫</h1></div>
+          </div>
+          <nav class="header-actions" aria-label="メインメニュー">
+            <button id="settings-button" class="button button-quiet" type="button" aria-label="設定・バックアップ"><span class="label-full">設定・バックアップ</span><span class="label-short">設定</span></button>
+            <button id="lock-button" class="button button-outline" type="button">ロック</button>
+          </nav>
+        </header>
+
+        <div id="conflict-banner" class="conflict-banner" role="alert" hidden>
+          <p>別のタブでVaultが更新されました。この画面の内容は古いため保存できません。再読み込みしてください。</p>
+          <button id="conflict-reload-button" class="button button-primary" type="button">再読み込み</button>
+        </div>
+        <div class="workspace">
+          <section id="list-view" class="content-panel" aria-labelledby="list-title">
+            <div class="section-heading">
+              <div><p class="eyebrow">ENTRIES</p><h2 id="list-title">登録情報</h2></div>
+              <button id="new-entry-button" class="button button-primary" type="button">＋ 新規登録</button>
+            </div>
+            <label class="search-box" for="search-input">
+              <span aria-hidden="true">⌕</span>
+              <input id="search-input" type="search" placeholder="サービス名・URL・ユーザーIDで検索" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+            </label>
+            <div id="entry-list" class="entry-list"></div>
+            <div id="empty-state" class="empty-state" hidden>
+              <div class="empty-icon" aria-hidden="true">◇</div>
+              <h3 id="empty-title">登録情報はまだありません</h3>
+              <p id="empty-copy">「新規登録」から最初の情報を追加できます。</p>
+            </div>
+          </section>
+
+          <section id="editor-view" class="content-panel" hidden aria-labelledby="editor-title">
+            <div class="section-heading">
+              <div><p class="eyebrow">ENTRY</p><h2 id="editor-title">新規登録</h2></div>
+              <button class="button button-quiet js-back-list" type="button">一覧へ戻る</button>
+            </div>
+            <form id="entry-form" class="entry-form" novalidate autocomplete="off">
+              <input id="entry-id" type="hidden">
+              <div class="field-grid">
+                <div class="field field-span-2"><label for="service-name">サービス名 <span>必須</span></label><input id="service-name" type="text" maxlength="100" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+                <div class="field field-span-2"><label for="service-url">URL</label><input id="service-url" type="url" inputmode="url" maxlength="2048" placeholder="https://example.invalid" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
+                <div class="field field-span-2"><label for="user-id">ユーザーID／メールアドレス</label><input id="user-id" type="text" maxlength="320" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"></div>
+                <div class="field field-span-2">
+                  <label for="entry-password">パスワード <span>必須</span></label>
+                  <div class="input-action"><input id="entry-password" type="password" maxlength="1024" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"><button id="toggle-form-password" class="button button-inline" type="button" aria-pressed="false" aria-controls="entry-password">表示</button></div>
+                </div>
+                <div class="generator field-span-2" aria-labelledby="generator-title">
+                  <div class="generator-heading"><h3 id="generator-title">パスワード生成</h3><button id="generate-button" class="button button-secondary" type="button">生成して入力</button></div>
+                  <div class="generator-options">
+                    <label class="length-control" for="password-length">文字数 <output id="length-output" for="password-length">20</output><input id="password-length" type="range" min="12" max="64" value="20"></label>
+                    <label><input id="include-upper" type="checkbox" checked> 英大文字</label>
+                    <label><input id="include-lower" type="checkbox" checked> 英小文字</label>
+                    <label><input id="include-number" type="checkbox" checked> 数字</label>
+                    <label><input id="include-symbol" type="checkbox" checked> 記号</label>
+                  </div>
+                </div>
+                <div class="field field-span-2"><label for="entry-notes">メモ</label><textarea id="entry-notes" maxlength="5000" rows="5" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea></div>
+              </div>
+              <p id="entry-error" class="form-error" role="alert"></p>
+              <div class="form-actions"><button class="button button-quiet js-back-list" type="button">キャンセル</button><button class="button button-primary" type="submit">暗号化して保存</button></div>
+            </form>
+          </section>
+
+          <section id="detail-view" class="content-panel" hidden aria-labelledby="detail-title">
+            <div class="section-heading">
+              <div><p class="eyebrow">DETAIL</p><h2 id="detail-title">詳細</h2></div>
+              <button class="button button-quiet js-back-list" type="button">一覧へ戻る</button>
+            </div>
+            <dl id="detail-fields" class="detail-fields"></dl>
+            <!-- Copy is the most frequent action: a large bar that sticks to the bottom on phones. -->
+            <div class="detail-copy-bar">
+              <button id="copy-user-button" class="button button-secondary" type="button">ユーザーIDをコピー</button>
+              <button id="copy-password-button" class="button button-primary" type="button">パスワードをコピー</button>
+            </div>
+            <div class="detail-actions">
+              <button id="edit-entry-button" class="button button-outline" type="button">編集</button>
+              <button id="delete-entry-button" class="button button-danger" type="button">削除</button>
+            </div>
+          </section>
+
+          <section id="settings-view" class="content-panel" hidden aria-labelledby="settings-title">
+            <div class="section-heading">
+              <div><p class="eyebrow">SETTINGS</p><h2 id="settings-title">設定・バックアップ</h2></div>
+              <button class="button button-quiet js-back-list" type="button">一覧へ戻る</button>
+            </div>
+            <div class="settings-grid">
+              <article class="setting-card">
+                <h3>自動ロック</h3>
+                <p>最後の操作からの経過時間が設定値を超えたら、復号済みデータと暗号鍵への参照を破棄します。スリープやタブ非表示の後も経過時間で判定し、戻る／進むでページが復帰した場合は常にロックします。</p>
+                <label for="auto-lock-minutes">ロックまでの時間</label>
+                <select id="auto-lock-minutes"><option value="1">1分</option><option value="5">5分</option><option value="10">10分</option><option value="15">15分</option><option value="30">30分</option><option value="60">60分</option><option value="120">120分</option></select>
+                <button id="save-settings-button" class="button button-primary" type="button">設定を保存</button>
+              </article>
+              <article class="setting-card">
+                <h3>暗号化バックアップ</h3>
+                <p>マスターパスワードで暗号化されたデータだけをJSONファイルに保存します。</p>
+                <button id="export-button" class="button button-secondary" type="button">バックアップを書き出す</button>
+              </article>
+              <article class="setting-card">
+                <h3>アプリのバージョン</h3>
+                <p>オフラインでも動くよう、この端末にアプリ本体だけを保存しています（保管庫のデータは含みません）。新しいバージョンがあると画面上部に通知します。</p>
+                <p class="app-version">バージョン: <span id="app-version">—</span></p>
+              </article>
+              <article class="setting-card setting-card-warning">
+                <h3>バックアップを復元</h3>
+                <p>バックアップ作成時のマスターパスワードで復号・検証できた場合だけ、確認後に内容を置き換えます。置き換えた内容は現在の保管庫の鍵で暗号化し直すため、現在のマスターパスワードは変わりません。</p>
+                <label class="file-picker" for="import-file">暗号化バックアップを選択</label>
+                <input id="import-file" type="file" accept="application/json,.json">
+                <label for="import-password">バックアップのマスターパスワード</label>
+                <input id="import-password" type="password" maxlength="200" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other">
+                <button id="import-button" class="button button-outline" type="button">検証して復元</button>
+                <p id="import-error" class="form-error" role="alert"></p>
+              </article>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="confirm-dialog">
+      <form method="dialog" class="dialog-card">
+        <p class="eyebrow">CONFIRM</p>
+        <h2 id="confirm-title">確認</h2>
+        <p id="confirm-message"></p>
+        <div class="dialog-actions"><button value="cancel" class="button button-quiet">キャンセル</button><button id="confirm-accept" value="confirm" class="button button-danger">実行する</button></div>
+      </form>
+    </dialog>
+
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>
+
